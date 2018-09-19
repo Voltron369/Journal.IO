@@ -44,6 +44,7 @@ public class ApiTest {
                 .setMaxWriteBatchSize(1024 * 10);
         // Open the journal:
         Journal journal = builder.open();
+        journal.setSingleThreaded();
 
         // Write to the journal:
         int iterations = 1000;

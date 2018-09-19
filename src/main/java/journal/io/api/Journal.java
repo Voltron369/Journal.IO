@@ -19,31 +19,9 @@ import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.nio.ByteBuffer;
 import java.nio.charset.Charset;
-import java.util.Arrays;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.Comparator;
-import java.util.Iterator;
-import java.util.LinkedList;
-import java.util.List;
+import java.util.*;
 import java.util.Map.Entry;
-import java.util.NoSuchElementException;
-import java.util.Queue;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.ConcurrentNavigableMap;
-import java.util.concurrent.ConcurrentSkipListMap;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.Executor;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ThreadFactory;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.zip.Adler32;
 import java.util.zip.Checksum;
@@ -115,7 +93,7 @@ public class Journal {
     private volatile boolean managedDisposer;
     private volatile Executor writer;
     private volatile ScheduledExecutorService disposer;
-    private volatile DataFileAppender appender;
+    private volatile IDataFileAppender appender;
     private volatile DataFileAccessor accessor;
     //
     private volatile boolean opened;
@@ -672,6 +650,11 @@ public class Journal {
         this.recoveryErrorHandler = recoveryErrorHandler;
     }
 
+    public void setSingleThreaded() {
+        appender = new DataFileAppenderSingleThreaded(this);
+        appender.open();
+    }
+
     public String toString() {
         return directory.toString();
     }
@@ -823,7 +806,7 @@ public class Journal {
             Location tmpBatchLocation = null;
             try {
                 Location currentUserLocation = goToFirstLocation(tmpFile, Location.USER_RECORD_TYPE, false);
-                WriteBatch batch = new WriteBatch(tmpFile, 0);
+                WriteBatch batch = new WriteBatch(tmpFile, 0,true);
                 batch.prepareBatch();
                 while (currentUserLocation != null) {
                     byte[] data = accessor.readLocation(currentUserLocation, false);
@@ -946,23 +929,25 @@ public class Journal {
         private static byte[] EMPTY_BUFFER = new byte[0];
         //
         private final DataFile dataFile;
-        private final Queue<WriteCommand> writes = new ConcurrentLinkedQueue<WriteCommand>();
+        private final Queue<WriteCommand> writes;
         private final CountDownLatch latch = new CountDownLatch(1);
         private volatile long offset;
         private volatile int pointer;
         private volatile int size;
 
-        WriteBatch() {
+        WriteBatch(boolean mt) {
             this.dataFile = null;
             this.offset = -1;
             this.pointer = -1;
+            writes = mt?new ConcurrentLinkedQueue<WriteCommand>():new LinkedList<WriteCommand>();
         }
 
-        WriteBatch(DataFile dataFile, int pointer) throws IOException {
+        WriteBatch(DataFile dataFile, int pointer, boolean mt) throws IOException {
             this.dataFile = dataFile;
             this.offset = dataFile.getLength();
             this.pointer = pointer;
             this.size = BATCH_CONTROL_RECORD_SIZE;
+            writes = mt?new ConcurrentLinkedQueue<WriteCommand>():new LinkedList<WriteCommand>();
         }
 
         boolean canBatch(WriteCommand write, int maxWriteBatchSize, int maxFileLength) throws IOException {

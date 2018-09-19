@@ -34,7 +34,7 @@ import static journal.io.util.LogHelper.*;
  * @author <a href="http://hiramchirino.com">Hiram Chirino</a>
  * @author Sergio Bossa
  */
-class DataFileAppender {
+class DataFileAppender implements IDataFileAppender {
 
     private final int SPIN_RETRIES = 100;
     private final int SPIN_BACKOFF = 10;
@@ -56,7 +56,7 @@ class DataFileAppender {
         this.journal = journal;
     }
 
-    Location storeItem(byte[] data, byte type, boolean sync, WriteCallback callback) throws IOException {
+    public Location storeItem(byte[] data, byte type, boolean sync, WriteCallback callback) throws IOException {
         int size = Journal.RECORD_HEADER_SIZE + data.length;
 
         Location location = new Location();
@@ -77,7 +77,7 @@ class DataFileAppender {
         return location;
     }
 
-    Future<Boolean> sync() throws ClosedJournalException, IOException {
+    public Future<Boolean> sync() throws ClosedJournalException, IOException {
         int spinnings = 0;
         int limit = SPIN_RETRIES;
         while (true) {
@@ -137,11 +137,11 @@ class DataFileAppender {
                         if (nextWriteBatch == null) {
                             DataFile file = journal.getCurrentWriteDataFile();
                             boolean canBatch = false;
-                            currentBatch = new WriteBatch(file, journal.getLastAppendLocation().getPointer() + 1);
+                            currentBatch = new WriteBatch(file, journal.getLastAppendLocation().getPointer() + 1,true);
                             canBatch = currentBatch.canBatch(writeRecord, journal.getMaxWriteBatchSize(), journal.getMaxFileLength());
                             if (!canBatch) {
                                 file = journal.newDataFile();
-                                currentBatch = new WriteBatch(file, 0);
+                                currentBatch = new WriteBatch(file, 0,true);
                             }
                             WriteCommand controlRecord = currentBatch.prepareBatch();
                             writeRecord.getLocation().setDataFileId(file.getDataFileId());
@@ -204,12 +204,12 @@ class DataFileAppender {
         return writeRecord.getLocation();
     }
 
-    void open() {
+    public void open() {
         writer = journal.getWriter();
         opened = true;
     }
 
-    void close() throws IOException {
+    public void close() throws IOException {
         try {
             opened = false;
             while (batching.get() == true) {
