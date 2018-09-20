@@ -657,8 +657,8 @@ public class Journal {
         appender.open();
     }
 
-    public void setUseDisruptor(int size) {
-        appender = new DataFileAppenderDisruptor(this, size);
+    public void setUseDisruptor(int size, int size2) {
+        appender = new DataFileAppenderDisruptor(this, size, size2);
         appender.open();
     }
 
@@ -1109,8 +1109,8 @@ public class Journal {
 
     static class WriteCommand {
 
-        private final Location location;
-        private final boolean sync;
+        private Location location;
+        private boolean sync;
         private volatile byte[] data;
 
         WriteCommand(Location location, byte[] data, boolean sync) {
@@ -1130,6 +1130,27 @@ public class Journal {
         boolean isSync() {
             return sync;
         }
+
+        public void setLocation(Location location) {
+            this.location = location;
+        }
+
+        public void setSync(boolean sync) {
+            this.sync = sync;
+        }
+
+        public void setData(byte[] data) {
+            this.data = data;
+        }
+
+        public final static EventFactory EVENT_FACTORY = new EventFactory() {
+            @Override
+            public WriteCommand newInstance() {
+                Location loc = new Location();
+                return new WriteCommand(loc,null,false);
+            }
+        };
+
     }
 
     static class WriteFuture implements Future<Boolean> {

@@ -44,7 +44,7 @@ public class ApiTest {
                 .setMaxWriteBatchSize(1024 * 10);
         // Open the journal:
         Journal journal = builder.open();
-        journal.setUseDisruptor(16);
+        journal.setUseDisruptor(16, 16);
 
         // Write to the journal:
         int iterations = 1000;
