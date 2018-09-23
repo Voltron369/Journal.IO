@@ -131,3 +131,20 @@ Journal.IO is based on the HawtJournal project, for original copyright note see:
 [Arek Burdach](https://github.com/arkadius) (Contributor)
 
 [Brandon Seibel](https://github.com/bseibel) (Contributor)
+
+baseline performance
+
+ReadPerformanceTest.testRandomRead: [measured 3 out of 4 rounds, threads: 1 (sequential)]
+ round: 118.41 [+- 5.03], round.block: 0.00 [+- 0.00], round.gc: 0.00 [+- 0.00], GC.calls: 6, GC.time: 1.05, time.total: 484.62, time.warmup: 129.40, time.bench: 355.22
+ReadPerformanceTest.testSequentialRead: [measured 3 out of 4 rounds, threads: 1 (sequential)]
+ round: 14.77 [+- 0.20], round.block: 0.00 [+- 0.00], round.gc: 0.00 [+- 0.00], GC.calls: 9, GC.time: 0.98, time.total: 59.08, time.warmup: 14.78, time.bench: 44.30
+WritePerformanceTest.testAsyncWrite: [measured 3 out of 4 rounds, threads: 1 (sequential)]
+ round: 0.55 [+- 0.08], round.block: 0.00 [+- 0.00], round.gc: 0.00 [+- 0.00], GC.calls: 0, GC.time: 0.00, time.total: 2.22, time.warmup: 0.56, time.bench: 1.66
+WritePerformanceTest.testSyncWrite: [measured 3 out of 4 rounds, threads: 1 (sequential)]
+ round: 32.63 [+- 0.33], round.block: 0.00 [+- 0.00], round.gc: 0.00 [+- 0.00], GC.calls: 3, GC.time: 0.17, time.total: 131.32, time.warmup: 33.42, time.bench: 97.90
+WritePerformanceTest.testConcurrentWrite: [measured 3 out of 4 rounds, threads: 1 (sequential)]
+ round: 0.55 [+- 0.09], round.block: 0.00 [+- 0.00], round.gc: 0.00 [+- 0.00], GC.calls: 1, GC.time: 0.20, time.total: 2.13, time.warmup: 0.50, time.bench: 1.64
+
+Process finished with exit code 0
+
+
