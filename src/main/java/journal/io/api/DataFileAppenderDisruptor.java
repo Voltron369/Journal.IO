@@ -13,9 +13,7 @@
  */
 package journal.io.api;
 
-import com.lmax.disruptor.BlockingWaitStrategy;
-import com.lmax.disruptor.EventHandler;
-import com.lmax.disruptor.WaitStrategy;
+import com.lmax.disruptor.*;
 import com.lmax.disruptor.dsl.Disruptor;
 import com.lmax.disruptor.dsl.ProducerType;
 import journal.io.api.Journal.WriteBatch;
@@ -25,6 +23,8 @@ import journal.io.api.Journal.WriteFuture;
 import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.io.RandomAccessFile;
+import java.util.Iterator;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -41,12 +41,7 @@ import static journal.io.util.LogHelper.warn;
  * @author Sergio Bossa
  */
 class DataFileAppenderDisruptor implements IDataFileAppender {
-
-    private final int SPIN_RETRIES = 100;
-    private final int SPIN_BACKOFF = 10;
-    //
     private final AtomicReference<Exception> asyncException = new AtomicReference<Exception>();
-    private final AtomicBoolean batching = new AtomicBoolean(false);
     private volatile boolean opened;
     //
     private final Journal journal;
@@ -56,24 +51,33 @@ class DataFileAppenderDisruptor implements IDataFileAppender {
     private volatile DataFile lastAppendDataFile;
     private volatile RandomAccessFile lastAppendRaf;
     WaitStrategy waitStrategy = new BlockingWaitStrategy();
+    WaitStrategy waitStrategy2 = new BusySpinWaitStrategy();
     private final Disruptor<WriteBatch> writeBatchDisruptor;
     private final Disruptor<WriteCommand> writeCommandDisruptor;
 
-    DataFileAppenderDisruptor(Journal journal, int size, int size2) {
+    DataFileAppenderDisruptor(final Journal journal, int size, int size2) {
         writeBatchDisruptor = new Disruptor<>(WriteBatch.EVENT_FACTORY,size,Executors.defaultThreadFactory(),ProducerType.SINGLE,waitStrategy);
-        writeCommandDisruptor = new Disruptor<>(WriteCommand.EVENT_FACTORY,size2,Executors.defaultThreadFactory(),ProducerType.SINGLE,waitStrategy);
+        writeCommandDisruptor = new Disruptor<>(WriteCommand.EVENT_FACTORY,size2,Executors.defaultThreadFactory(),ProducerType.MULTI,waitStrategy2);
         this.journal = journal;
         writeBatchDisruptor.handleEventsWith(new EventHandler<WriteBatch>() {
             @Override
             public void onEvent(WriteBatch writeBatch, long l, boolean b) throws Exception {
-                writeBatch.checksum();
-                //runBatch(writeBatch);
-                //writeBatch.clear();
+                writeBatch.finalizeBatch(journal.isChecksum());
             }
         }).then(new EventHandler<WriteBatch>() {
             @Override
             public void onEvent(WriteBatch writeBatch, long l, boolean b) throws Exception {
                 runBatch(writeBatch);
+            }
+        } , new EventHandler<WriteBatch>() {
+            @Override
+            public void onEvent(WriteBatch writeBatch, long l, boolean b) throws Exception {
+                //writeBatch.inflight(journal);
+            }
+        }).then(new EventHandler<WriteBatch>() {
+            @Override
+            public void onEvent(WriteBatch writeBatch, long l, boolean b) throws Exception {
+                //writeBatch.inflight(journal);
                 writeBatch.clear();
             }
         });
@@ -82,6 +86,11 @@ class DataFileAppenderDisruptor implements IDataFileAppender {
             public void onEvent(WriteCommand writeCommand, long l, boolean b) throws Exception {
                 runWrite(writeCommand);
             }
+        }).then(new EventHandler<WriteCommand>() {
+            @Override
+            public void onEvent(WriteCommand writeCommand, long l, boolean b) throws Exception {
+                writeCommand.getLocation().getLatch().await();
+            }
         });
     }
 
@@ -89,57 +98,70 @@ class DataFileAppenderDisruptor implements IDataFileAppender {
         int size = Journal.RECORD_HEADER_SIZE + data.length;
 
         long sequenceId = writeCommandDisruptor.getRingBuffer().next();
+        if (!writeCommandDisruptor.getRingBuffer().hasAvailableCapacity(1)) {
+            sync = true;
+        }
         WriteCommand write = writeCommandDisruptor.get(sequenceId);
 
-        Location location = write.getLocation();
+        CountDownLatch latch = null;
+
+        Location location = new Location();
         location.setSize(size);
         location.setType(type);
         location.setWriteCallback(callback);
+        latch = new CountDownLatch(1);
+        location.setLatch2(latch);
+        write.setLocation(location);
         write.setData(data);
         write.setSync(sync);
         writeCommandDisruptor.getRingBuffer().publish(sequenceId);
-        return write.getLocation();
-    }
-
-    public Future<Boolean> sync() throws ClosedJournalException, IOException {
-        int spinnings = 0;
-        int limit = SPIN_RETRIES;
-        while (true) {
+        if (!opened) {
+            throw new ClosedJournalException("The journal is closed!");
+        }
+        try {
+            latch.await();
             if (asyncException.get() != null) {
                 throw new IOException(asyncException.get());
             }
-            try {
-                if (!opened) {
-                    throw new ClosedJournalException("The journal is closed!");
-                }
-                if (batching.compareAndSet(false, true)) {
-                    try {
-                        Future result = null;
-                        if (nextWriteBatch != null) {
-                            result = new WriteFuture(nextWriteBatch.getLatch());
-                            writeBatchDisruptor.getRingBuffer().publish(sequenceId);
-                            nextWriteBatch = null;
-                        } else {
-                            result = new WriteFuture(journal.getLastAppendLocation().getLatch());
-                        }
-                        return result;
-                    } finally {
-                        batching.set(false);
-                    }
-                } else {
-                    // Spin waiting for new batch ...
-                    if (spinnings <= limit) {
-                        spinnings++;
-                        continue;
-                    } else {
-                        Thread.sleep(SPIN_BACKOFF);
-                        continue;
-                    }
-                }
-            } catch (InterruptedException ex) {
-                throw new IllegalStateException(ex.getMessage(), ex);
+            if (sync)
+                location.getLatch().await();
+            if (asyncException.get() != null) {
+                throw new IOException(asyncException.get());
             }
+        } catch (InterruptedException e) {
         }
+        return location;
+    }
+
+    public Future<Boolean> sync() throws ClosedJournalException, IOException {
+        int size = Journal.RECORD_HEADER_SIZE;
+        long sequenceId = writeCommandDisruptor.getRingBuffer().next();
+        WriteCommand write = writeCommandDisruptor.get(sequenceId);
+
+        CountDownLatch latch=new CountDownLatch(1);;
+
+        Location location = new Location();
+        location.setLatch2(latch);
+        location.setSize(size);
+        location.setType(Location.SYNC_TYPE);
+        location.setWriteCallback(Location.NoWriteCallback.INSTANCE);
+        write.setLocation(location);
+        write.setSync(true);
+        writeCommandDisruptor.getRingBuffer().publish(sequenceId);
+        if (!opened) {
+            throw new ClosedJournalException("The journal is closed!");
+        }
+        try {
+            latch.await();
+            if (asyncException.get() != null) {
+                throw new IOException(asyncException.get());
+            }
+            location.getLatch().await();
+            if (asyncException.get() != null) {
+                throw new IOException(asyncException.get());
+            }
+        } catch (InterruptedException e) {}
+        return new WriteFuture(location.getLatch());
     }
 
     private Location runWrite(WriteCommand writeRecord) throws ClosedJournalException, IOException {
@@ -149,60 +171,75 @@ class DataFileAppenderDisruptor implements IDataFileAppender {
                 throw new IOException(asyncException.get());
             }
             if (!opened) {
+                asyncException.set(new ClosedJournalException("The journal is closed!"));
                 throw new ClosedJournalException("The journal is closed!");
             }
-            try {
+            if (writeRecord.getLocation().getType() == Location.SYNC_TYPE) {
                 if (nextWriteBatch == null) {
-                    DataFile file = journal.getCurrentWriteDataFile();
-                    boolean canBatch = false;
-                    sequenceId = writeBatchDisruptor.getRingBuffer().next();
-                    currentBatch = writeBatchDisruptor.get(sequenceId);
+                    writeRecord.getLocation().setLatch(writeRecord.getLocation().getLatch2());
+                    writeRecord.getLocation().getLatch2().countDown();
+                } else {
+                    writeRecord.getLocation().setLatch(nextWriteBatch.getLatch());
+                    writeBatchDisruptor.getRingBuffer().publish(sequenceId);
+                    writeRecord.getLocation().getLatch2().countDown();
+                    nextWriteBatch = null;
+                }
+                break;
+            }
+            if (nextWriteBatch == null) {
+                DataFile file = journal.getCurrentWriteDataFile();
+                boolean canBatch = false;
+                sequenceId = writeBatchDisruptor.getRingBuffer().next();
+                currentBatch = writeBatchDisruptor.get(sequenceId);
+                currentBatch.setDataFile(file);
+                currentBatch.setOffset(file.getLength());
+                currentBatch.setPointer(journal.getLastAppendLocation().getPointer() + 1);
+                currentBatch.setSize(BATCH_CONTROL_RECORD_SIZE);
+                canBatch = currentBatch.canBatch(writeRecord, journal.getMaxWriteBatchSize(), journal.getMaxFileLength());
+                if (!canBatch) {
+                    file = journal.newDataFile();
                     currentBatch.setDataFile(file);
                     currentBatch.setOffset(file.getLength());
-                    currentBatch.setPointer(journal.getLastAppendLocation().getPointer() + 1);
+                    currentBatch.setPointer(0);
                     currentBatch.setSize(BATCH_CONTROL_RECORD_SIZE);
-                    canBatch = currentBatch.canBatch(writeRecord, journal.getMaxWriteBatchSize(), journal.getMaxFileLength());
-                    if (!canBatch) {
-                        file = journal.newDataFile();
-                        currentBatch.setDataFile(file);
-                        currentBatch.setOffset(file.getLength());
-                        currentBatch.setPointer(0);
-                        currentBatch.setSize(BATCH_CONTROL_RECORD_SIZE);
-                    }
-                    WriteCommand controlRecord = currentBatch.prepareBatch();
-                    writeRecord.getLocation().setDataFileId(file.getDataFileId());
-                    writeRecord.getLocation().setPointer(currentBatch.incrementAndGetPointer());
-                    writeRecord.getLocation().setLatch(currentBatch.getLatch());
-                    currentBatch.appendBatch(writeRecord);
-                    if (!writeRecord.isSync()) {
-                        nextWriteBatch = currentBatch;
-                    } else {
-                        writeBatchDisruptor.getRingBuffer().publish(sequenceId);
-                    }
+                }
+                WriteCommand controlRecord = currentBatch.prepareBatch();
+                writeRecord.getLocation().setDataFileId(file.getDataFileId());
+                writeRecord.getLocation().setPointer(currentBatch.incrementAndGetPointer());
+                writeRecord.getLocation().setLatch(currentBatch.getLatch());
+                currentBatch.appendBatch(writeRecord);
+                if (!writeRecord.isSync()) {
+                    journal.getInflightWrites().put(controlRecord.getLocation(), controlRecord);
+                    journal.getInflightWrites().put(writeRecord.getLocation(), writeRecord);
+                    nextWriteBatch = currentBatch;
+                } else {
+                    writeBatchDisruptor.getRingBuffer().publish(sequenceId);
+                }
+                journal.setLastAppendLocation(writeRecord.getLocation());
+                writeRecord.getLocation().getLatch2().countDown();
+                break;
+            } else {
+                boolean canBatch = nextWriteBatch.canBatch(writeRecord, journal.getMaxWriteBatchSize(), journal.getMaxFileLength());
+                writeRecord.getLocation().setDataFileId(nextWriteBatch.getDataFile().getDataFileId());
+                writeRecord.getLocation().setPointer(nextWriteBatch.incrementAndGetPointer());
+                writeRecord.getLocation().setLatch(nextWriteBatch.getLatch());
+                if (canBatch && !writeRecord.isSync()) {
+                    nextWriteBatch.appendBatch(writeRecord);
+                    journal.getInflightWrites().put(writeRecord.getLocation(), writeRecord);
                     journal.setLastAppendLocation(writeRecord.getLocation());
+                    writeRecord.getLocation().getLatch2().countDown();
+                    break;
+                } else if (canBatch && writeRecord.isSync()) {
+                    nextWriteBatch.appendBatch(writeRecord);
+                    journal.setLastAppendLocation(writeRecord.getLocation());
+                    writeBatchDisruptor.getRingBuffer().publish(sequenceId);
+                    writeRecord.getLocation().getLatch2().countDown();
+                    nextWriteBatch = null;
                     break;
                 } else {
-                    boolean canBatch = nextWriteBatch.canBatch(writeRecord, journal.getMaxWriteBatchSize(), journal.getMaxFileLength());
-                    writeRecord.getLocation().setDataFileId(nextWriteBatch.getDataFile().getDataFileId());
-                    writeRecord.getLocation().setPointer(nextWriteBatch.incrementAndGetPointer());
-                    writeRecord.getLocation().setLatch(nextWriteBatch.getLatch());
-                    if (canBatch && !writeRecord.isSync()) {
-                        nextWriteBatch.appendBatch(writeRecord);
-                        journal.setLastAppendLocation(writeRecord.getLocation());
-                        break;
-                    } else if (canBatch && writeRecord.isSync()) {
-                        nextWriteBatch.appendBatch(writeRecord);
-                        journal.setLastAppendLocation(writeRecord.getLocation());
-                        writeBatchDisruptor.getRingBuffer().publish(sequenceId);
-                        nextWriteBatch = null;
-                        break;
-                    } else {
-                        writeBatchDisruptor.getRingBuffer().publish(sequenceId);
-                        nextWriteBatch = null;
-                    }
+                    writeBatchDisruptor.getRingBuffer().publish(sequenceId);
+                    nextWriteBatch = null;
                 }
-            } finally {
-                batching.set(false);
             }
         }
         return writeRecord.getLocation();
@@ -215,22 +252,14 @@ class DataFileAppenderDisruptor implements IDataFileAppender {
     }
 
     public void close() throws IOException {
-        try {
-            opened = false;
-            if (nextWriteBatch != null) {
-                writeBatchDisruptor.getRingBuffer().publish(sequenceId);
-                nextWriteBatch.getLatch().await();
-                nextWriteBatch = null;
-            }
-            journal.setLastAppendLocation(null);
-            if (lastAppendRaf != null) {
-                lastAppendRaf.close();
-            }
-        } catch (InterruptedException e) {
-            throw new InterruptedIOException();
-        }
+        sync();
         writeBatchDisruptor.shutdown();
+        journal.setLastAppendLocation(null);
+        if (lastAppendRaf != null) {
+            lastAppendRaf.close();
+        }
         writeCommandDisruptor.shutdown();
+        opened = false;
     }
 
     public Exception getAsyncException() {
@@ -267,6 +296,7 @@ class DataFileAppenderDisruptor implements IDataFileAppender {
                         } catch (Throwable ex) {
                             warn(ex, ex.getMessage());
                         }
+                        journal.getInflightWrites().remove(current.getLocation());
                     }
 
                     // Finally signal any waiting threads that the write is on disk.

@@ -461,7 +461,6 @@ class DataFileAccessor {
         } else if (remaining == 0) {
             return false;
         } else {
-
             if (journal.isOpened()) {
                 // If journal is open, it means the positions may be wrong due to
                 // compaction:

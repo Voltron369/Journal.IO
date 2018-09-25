@@ -138,7 +138,8 @@ public class Journal {
         accessor = new DataFileAccessor(this);
         accessor.open();
 
-        appender = new DataFileAppender(this);
+        //appender = new DataFileAppender(this);
+        appender = new DataFileAppenderDisruptor(this,1024*1024,1024*1024);
         appender.open();
 
         dataFiles.clear();
@@ -938,18 +939,21 @@ public class Journal {
         //
         private DataFile dataFile;
         private final Queue<WriteCommand> writes;
-        private final CountDownLatch latch = new CountDownLatch(1);
+        private volatile CountDownLatch latch;
         private volatile long offset;
         private volatile int pointer;
         private volatile int size;
-        Checksum adler32 = new Adler32();
-        //private static byte[] sbuffer = new byte[DEFAULT_MAX_BATCH_SIZE];
+        Checksum adler32;
+        ByteBuffer buffer;
 
         WriteBatch(boolean mt) {
             this.dataFile = null;
             this.offset = -1;
             this.pointer = -1;
             writes = mt?new ConcurrentLinkedQueue<WriteCommand>():new LinkedList<WriteCommand>();
+            adler32 = new Adler32();
+            latch = new CountDownLatch(1);
+            buffer = null;
         }
 
         WriteBatch(DataFile dataFile, int pointer, boolean mt) throws IOException {
@@ -958,10 +962,19 @@ public class Journal {
             this.pointer = pointer;
             this.size = BATCH_CONTROL_RECORD_SIZE;
             writes = mt?new ConcurrentLinkedQueue<WriteCommand>():new LinkedList<WriteCommand>();
+            adler32 = new Adler32();
+            latch = new CountDownLatch(1);
+            buffer = null;
         }
 
         void clear() {
+            this.dataFile = null;
+            this.offset = -1;
+            this.pointer = -1;
             writes.clear();
+            adler32 = new Adler32();
+            buffer = null;
+            latch = new CountDownLatch(1);
         }
 
         boolean canBatch(WriteCommand write, int maxWriteBatchSize, int maxFileLength) throws IOException {
@@ -992,21 +1005,8 @@ public class Journal {
             writes.offer(writeRecord);
         }
 
-        void checksum() {
-            Iterator<WriteCommand> commands = writes.iterator();
-            // Skip the control write:
-            commands.next();
-            // Process others:
-            while (commands.hasNext()) {
-                WriteCommand current = commands.next();
-                adler32.update(current.getData(), 0, current.getData().length);
-            }
-
-        }
-
-        Location perform(RandomAccessFile file, boolean checksum, boolean physicalSync, ReplicationTarget replicationTarget) throws IOException {
-            //ByteBuffer buffer = ByteBuffer.wrap(sbuffer);
-            ByteBuffer buffer = ByteBuffer.allocate(size);
+        void finalizeBatch(boolean checksum) {
+            buffer = ByteBuffer.allocate(size);
             WriteCommand control = writes.peek();
 
             // Write an empty batch control record.
@@ -1026,7 +1026,7 @@ public class Journal {
                 buffer.put(current.location.getType());
                 buffer.put(current.getData());
                 if (checksum) {
-                    // adler32.update(current.getData(), 0, current.getData().length);
+                    adler32.update(current.getData(), 0, current.getData().length);
                 }
             }
 
@@ -1035,6 +1035,19 @@ public class Journal {
             if (checksum) {
                 buffer.putLong(adler32.getValue());
             }
+        }
+
+        void inflight(Journal journal) {
+            Iterator<WriteCommand> commands = writes.iterator();
+            while (commands.hasNext()) {
+                WriteCommand current = commands.next();
+                journal.getInflightWrites().put(current.getLocation(), current);
+            }
+        }
+
+        Location perform(RandomAccessFile file, boolean checksum, boolean physicalSync, ReplicationTarget replicationTarget) throws IOException {
+
+            if (buffer == null) finalizeBatch(checksum);
 
             // Now do the 1 big write.
             file.seek(offset);
@@ -1045,7 +1058,10 @@ public class Journal {
                 IOHelper.sync(file.getFD());
             }
 
+            WriteCommand control = writes.peek();
+
             // And replicate:
+            // TODO: if buffer was null, defer this to another disruptor event handler
             try {
                 if (replicationTarget != null) {
                     replicationTarget.replicate(control.location, buffer.array());
@@ -1146,8 +1162,7 @@ public class Journal {
         public final static EventFactory EVENT_FACTORY = new EventFactory() {
             @Override
             public WriteCommand newInstance() {
-                Location loc = new Location();
-                return new WriteCommand(loc,null,false);
+                return new WriteCommand(null,null,false);
             }
         };
 

@@ -34,7 +34,7 @@ import org.junit.Ignore;
 /**
  * @author Sergio Bossa
  */
-@Ignore("Takes a long time, so disabled by default.")
+//@Ignore("Takes a long time, so disabled by default.")
 public class ReadPerformanceTest extends AbstractJournalTest {
 
     @Rule

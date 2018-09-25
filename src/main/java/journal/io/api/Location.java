@@ -30,6 +30,7 @@ public final class Location implements Comparable<Location> {
     static final byte USER_RECORD_TYPE = 1;
     static final byte BATCH_CONTROL_RECORD_TYPE = 2;
     static final byte DELETED_RECORD_TYPE = 3;
+    static final byte SYNC_TYPE = 3;
     //
     static final int NOT_SET = -1;
     //
@@ -50,6 +51,7 @@ public final class Location implements Comparable<Location> {
     private volatile WriteCallback writeCallback = NoWriteCallback.INSTANCE;
     private volatile byte[] data;
     private volatile CountDownLatch latch;
+    private volatile CountDownLatch latch2;
 
     public Location() {
     }
@@ -127,6 +129,14 @@ public final class Location implements Comparable<Location> {
 
     void setLatch(CountDownLatch latch) {
         this.latch = latch;
+    }
+
+    CountDownLatch getLatch2() {
+        return latch2;
+    }
+
+    void setLatch2(CountDownLatch latch2) {
+        this.latch2 = latch2;
     }
 
     void setWriteCallback(WriteCallback writeCallback) {

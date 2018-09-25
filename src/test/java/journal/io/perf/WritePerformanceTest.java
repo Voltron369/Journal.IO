@@ -31,7 +31,7 @@ import org.junit.rules.TestRule;
 /**
  * @author Sergio Bossa
  */
-@Ignore("Takes a long time, so disabled by default.")
+//@Ignore("Takes a long time, so disabled by default.")
 public class WritePerformanceTest extends AbstractJournalTest {
 
     @Rule
